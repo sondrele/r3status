@@ -1,0 +1,7 @@
+[package]
+name = "r3status"
+version = "0.1.0"
+authors = ["Sondre Lefsaker <sondrele@stud.ntnu.no>"]
+
+[dependencies]
+rustc-serialize = "0.3"
