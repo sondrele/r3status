@@ -2,8 +2,8 @@ extern crate rustc_serialize;
 use rustc_serialize::{json, Decodable, Decoder, Encodable, Encoder};
 
 use std::path::Path;
-use std::io::{self, LineWriter, Write, BufRead, BufReader};
-use std::process::{self, Command, Child, Output, ChildStdout};
+use std::io::{self, Error, ErrorKind, LineWriter, Write, BufRead, BufReader};
+use std::process::{self, Command, Child, ChildStdout};
 
 #[derive(Debug, PartialEq)]
 pub enum Alignment {
@@ -103,72 +103,75 @@ impl R3Status {
         }
     }
 
-    pub fn with_config(config: String) -> R3Status {
-        R3Status {
-            config_file: Some(config),
-            status_line: Vec::new(),
-            reader: None,
-            writer: LineWriter::new(io::stdout()),
-            buffer: String::new(),
-        }
+    pub fn config_file(&mut self, config: &str) {
+        self.config_file = Some(config.to_string());
     }
 
     pub fn clear(&mut self) {
         self.buffer.clear()
     }
 
-    pub fn read_line(&mut self) {
+    pub fn read_line(&mut self) -> io::Result<usize> {
         if let Some(reader) = self.reader.as_mut() {
             // trust i3status to give us valid utf8 for now...
             unsafe {
-                reader.read_until('\n' as u8, self.buffer.as_mut_vec());
+                reader.read_until('\n' as u8, self.buffer.as_mut_vec())
             }
-        }
-    }
-
-    pub fn write_buffer(&mut self) {
-        if self.buffer.ends_with("\n") {
-            self.writer.write(self.buffer.as_bytes());
         } else {
-            write!(self.writer, "{}\n", self.buffer);
+            Err(Error::new(ErrorKind::Other, "A reader has not been set for the process"))
         }
     }
 
-    pub fn write_str(&mut self, line: &str) {
-        self.writer.write(line.as_bytes());
+    pub fn flush_buffer(&mut self) -> io::Result<()> {
+        if self.buffer.ends_with("\n") {
+            try!(write!(self.writer, "{}", self.buffer))
+        } else {
+            try!(writeln!(self.writer, "{}", self.buffer))
+        }
+        self.clear();
+        Ok(())
     }
 
-    pub fn pipe_header(&mut self) {
-        self.read_line();
+    pub fn write_str(&mut self, line: &str) -> io::Result<()> {
+        self.writer.write_all(line.as_bytes())
+    }
+
+    pub fn write_msg(&mut self, msg: &str) -> io::Result<()> {
+        let m = Block { full_text: msg.to_string(), .. Default::default()};
+        self.buffer = json::encode(&vec![m]).unwrap();
+
+        try!(self.flush_buffer());
+        self.write_str(",")
+    }
+
+    pub fn pipe_header(&mut self) -> io::Result<()> {
+        try!(self.read_line());
 
         let mut h: Header = json::decode(&self.buffer).unwrap();
         h.click_events = Some(true);
         self.buffer = json::encode(&h).unwrap();
-        self.write_buffer();
-
-        self.clear();
+        self.flush_buffer()
     }
 
-    pub fn pipe_line(&mut self) {
-        self.read_line();
-        self.write_buffer();
-        self.clear();
+    pub fn pipe_line(&mut self) -> io::Result<()> {
+        try!(self.read_line());
+        self.flush_buffer()
     }
 
     pub fn run(&mut self) -> io::Result<()> {
-        let mut i3s = try!(spawn_i3status::<&Path>(None));
+        let mut i3s = try!(spawn_i3status(self.config_file.as_ref()));
 
         if let Some(i3out) = i3s.stdout {
             self.reader = Some(BufReader::new(i3out));
 
-            self.pipe_header();
+            try!(self.pipe_header());
             // Pipe the start of the infinate array
-            self.pipe_line();
+            try!(self.pipe_line());
             // Pipe the first line, this is the only line that is not prefixed with `,`
-            self.pipe_line();
+            try!(self.pipe_line());
 
             loop {
-                self.pipe_line();
+                try!(self.pipe_line());
             }
         } else {
             println!("Failed to aquire handle to i3status' `stdout`");
